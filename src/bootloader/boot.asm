@@ -66,11 +66,19 @@ main:
     ; setup stack
     mov ss, ax
     mov sp, 0x7C00 ;stack grows downward from where are loaded in from memory
-    
+   
+	;attempt to read from floppy
+	mov [ebr_drive_number], dl
+	mov ax, 1	;sector 1
+	mov cl, 1	;1 sector to read
+	mov bx, 0x7E00	;data is after bootloader
+	call disk_read
+
     ;set message in SI and call print function
     mov si, msg_hello
     call puts
-
+	
+	cli
     hlt
 
 ;error handling
@@ -132,7 +140,14 @@ lba_to_chs:
 ;	-dl: drive number
 ;	-es:bx: mem address to store data
 disk_read:
-	push cx ;save cx since call overwrites
+	push ax		;Save registers we modify
+	push bx
+	push cx
+	push dx
+	push di
+
+
+	push cx
 	call lba_to_chs ; convert into chs
 	pop ax	;move sectors to read -> al (Since only the lower bits of cx were set)
 	mov ah, 02h
@@ -145,7 +160,7 @@ disk_read:
 	
 	;failed
 	popa
-	call desk_reset
+	call disk_reset
 
 	dec di
 	test di, di
@@ -154,6 +169,29 @@ disk_read:
 .fail:
 	;write attempts exhausted
 	jmp floppy_error
+
+.done:
+	popa
+
+	pop di		;Restore registers we modified
+	pop dx
+	pop cx
+	pop bx
+	pop ax
+	ret
+
+;disk reset
+;params:
+;	-dl: drive number
+disk_reset:	
+	pusha
+	mov ah,0
+	stc
+	int 13h
+	jc floppy_error
+	popa
+	ret
+
 
 msg_hello: db 'Hello World!', nwL, 0
 msg_read_failed: db 'Read from disk failed', nwL, 0
