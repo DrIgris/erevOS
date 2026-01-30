@@ -2,3 +2,4 @@
 **/*bin
 **/*boch*
 debug.sh
+build/tools/fat.dSYM/*
