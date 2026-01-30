@@ -1,4 +1,4 @@
-*img
-*bin
-*boch*
+**/*img
+**/*bin
+**/*boch*
 debug.sh
