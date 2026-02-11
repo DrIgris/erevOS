@@ -1,10 +1,16 @@
-org 0x7C00
+org 0x0
 bits 16
 
 %define nwL 0x0d, 0x0a  ;macro for new line and carriage
 
 start:
-    jmp main
+
+    mov si, msg_hello
+    call puts
+
+.halt:
+	cli
+	hlt
 
 ; prints a string to the screen
 ; params:
@@ -29,25 +35,6 @@ puts:
     pop ax
     pop si
     ret
-main:
-    ; setup data segments 
-    mov ax, 0       ; can't write to ds/es directly
-    mov ds, ax
-    mov es, ax
 
-    ; setup stack
-    mov ss, ax
-    mov sp, 0x7C00 ;stack grows downward from where are loaded in from memory
-    
-    ;set message in SI and call print function
-    mov si, msg_hello
-    call puts
+msg_hello: db 'Hello World from KERNEL!', nwL, 0
 
-    hlt
-.halt:
-    jmp .halt
-
-msg_hello: db 'Hello World!', nwL, 0
-
-times 510-($-$$) db 0
-dw 0AA55h
