@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <ctype.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -46,13 +47,14 @@ typedef struct {
 	uint16_t EAIndex;
 	uint16_t LastModTime;
 	uint16_t LastModDate;
-	uint16_t FirstCluster;
+	uint16_t FirstClusterLow;
 	uint32_t FileSize;
 } __attribute__((packed)) DirectoryEntry;
 
 BootSector g_BS;
 uint8_t* g_FAT = NULL;
 DirectoryEntry* g_RootDir = NULL;
+uint32_t g_RootDirEnd;
 
 bool readBootSector(FILE* disk) {
 	return fread(&g_BS, sizeof(g_BS), 1, disk) > 0;
@@ -77,6 +79,7 @@ bool readRootDirectory(FILE* disk) {
 	if(size % g_BS.BytesPerSector > 0) {
 		sectors++;
 	}
+	g_RootDirEnd = lba + sectors;
 	g_RootDir = (DirectoryEntry*) malloc(sectors * g_BS.BytesPerSector);
 	return readSectors(disk, lba, sectors, g_RootDir);
 }
@@ -89,6 +92,26 @@ DirectoryEntry* findFile(const char* name) {
 	}
 	return NULL;
 }
+
+bool readFile(DirectoryEntry* fileEntry, FILE* disk, uint8_t* outputBuffer) {
+	bool running = true;
+	uint16_t currentCluster = fileEntry->FirstClusterLow;
+	do {
+		uint32_t lba = g_RootDirEnd + (currentCluster-2) * g_BS.SectorsPerCluster;
+		running = running && readSectors(disk, lba, g_BS.SectorsPerCluster, outputBuffer);
+		outputBuffer += g_BS.SectorsPerCluster * g_BS.BytesPerSector;
+
+		uint32_t fatIndex = currentCluster * 3/2;
+		if(currentCluster % 2 == 0)
+			currentCluster = (*(uint16_t*)(g_FAT + fatIndex)) & (0x0FFF);
+		else
+			currentCluster = (*(uint16_t*)(g_FAT + fatIndex)) >> 4;
+	} while (running && currentCluster < 0x0FF8);
+
+	return running;
+
+}
+
 
 int main (int argc, char** argv) {
 	if (argc < 3) {
@@ -123,6 +146,24 @@ int main (int argc, char** argv) {
 		free(g_RootDir);
 		return -5;
 	}
+
+	uint8_t* buffer = (uint8_t*) malloc(fileEntry->FileSize + g_BS.BytesPerSector);
+	if(!(readFile(fileEntry, disk, buffer))) {
+		fprintf(stderr, "Could not read file %s\n", argv[2]);
+		free(g_FAT);
+		free(g_RootDir);
+		free(buffer);
+		return -6;
+	}	
+
+	for(size_t i = 0; i < fileEntry->FileSize; i++) {
+		if(isprint(buffer[i]))
+			fputc(buffer[i], stdout);
+		else
+			printf("<%02x>", buffer[i]);
+	}
+	printf("\n");
+
 	free(g_FAT);
 	free(g_RootDir);
 	return 0;

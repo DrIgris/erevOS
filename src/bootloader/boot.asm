@@ -32,59 +32,165 @@ ebr_system_id: db 'FAT12   '
 ; end of headers
 
 start:
-    jmp main
-
-; prints a string to the screen
-; params:
-;   ds:si points to string
-
-puts:
-    ;save registers we modify
-    push si
-    push ax
-
-.loop:
-    lodsb       ;loads next character in al
-    or al, al   ;verify if next character is null
-    jz .done
-    
-    mov ah, 0x0e ;calling bios interupt for video TTY
-    mov bh, 0   ;setting page to 0
-    int 0x10
-    jmp .loop
-
-.done:
-    pop ax
-    pop si
-    ret
-main:
-    ; setup data segments 
-    mov ax, 0       ; can't write to ds/es directly
+   ; setup data segments 
+	;set es:di to 0000:0000 to check for bios bugs
+	mov ax, 0       ; can't write to ds/es directly
     mov ds, ax
     mov es, ax
 
     ; setup stack
     mov ss, ax
     mov sp, 0x7C00 ;stack grows downward from where are loaded in from memory
-   
-	;attempt to read from floppy
+	
+	push es
+	push word .after ;making sure code is being read from 0000:7c00 (or in this case starting from the .after label)
+	retf
+.after: 
+
+	;attempt to read from floppy, dl is what drive num we are reading
 	mov [ebr_drive_number], dl
-	mov ax, 1	;sector 1
-	mov cl, 1	;1 sector to read
-	mov bx, 0x7E00	;data is after bootloader
+
+	;print loading message
+	mov si, msg_loading
+    call puts
+
+	;read drive param
+	push es
+	mov ah, 0x08 ;read param specification
+	int 0x13 ;interrupt 13
+	jc floppy_error
+	pop es
+
+	and cl, 0x3F ;removes top 2 bits of cl
+	xor ch, ch ;clears c high, gets filled with num of cylinders - 1 (this includes top 2 bits of cl, why we clear the top two earlier)
+	mov [bdb_sectors_per_track], cx
+
+	inc dh ;dh is filled with last index of heads, i.e. num of heads - 1
+	mov [bdb_heads], dh ;head amt
+
+	;calc FAT root dir
+	mov ax, [bdb_sectors_per_fat]
+	mov bl, [bdb_fat_count]
+	xor bh, bh
+	mul bx ;move ax<-sectors per fat, mov bl<- fat count, clear bh(fat count is db not dw so we only take lower reg) and mult bx with ax
+
+	add ax, [bdb_reserved_sectors] ;move past reserved to root dir and push val onto stack
+	push ax
+
+	;calc size of root dir
+	mov ax, [bdb_sectors_per_fat]
+	shl ax, 5 ;ax *32 -> 2^5
+	xor dx, dx
+	div word [bdb_bytes_per_sector]
+
+	test dx, dx ; dx = 0
+	jz .root_dir_after ;checking if remainder and incr if so
+	inc ax
+
+.root_dir_after:
+	;read root
+	mov cl, al ;num  of sectors
+	pop ax	;LBA of rootdir
+	mov dl, [ebr_drive_number]
+	mov bx, buffer	;es:bx buffer
 	call disk_read
 
-    ;set message in SI and call print function
-    mov si, msg_hello
-    call puts
+	;search for kernel.bin
+	xor bx, bx
+	mov di, buffer
+
+.search_kernel:
+	mov si, file_kernel_bin
+	mov cx, 11 ;max num of characters to check
+
+	push di
+	repe cmpsb
+	pop di
+	je .found_kernel ;zf set as every character was found to be equal, i.e. matching string
+
+	add di, 32 ;move to next dir entry
+	inc bx
+	cmp bx, [bdb_dir_entries_count]
+	jl .search_kernel
+	jmp kernel_not_found_error
+.found_kernel:
+	;di has address of dir entry, first cluster is 26 offset
+	mov ax, [di + 26]
+	mov [kernel_cluster], ax
+
+	;load fat
+	mov ax, [bdb_reserved_sectors]
+	mov bx, buffer
+	mov cl, [bdb_sectors_per_fat]
+	mov dl, [ebr_drive_number]
+	call disk_read
+
+	mov bx, KERNEL_LOAD_SEG
+	mov es, bx
+	mov bx, KERNEL_LOAD_OFFSET
+.load_kernel_loop:
+	mov ax, [kernel_cluster]
+
+	;fix in future
+	add ax, 31
+
+	mov cl, 1
+	mov dl, [ebr_drive_number]
+	call disk_read
+
+	add bx, [bdb_bytes_per_sector]
+
+	mov ax, [kernel_cluster]
+	mov cx, 3
+	mul cx
+	mov cx, 2
+	div cx
+
+	mov si, buffer
+	add si, ax
+	mov ax, [ds:si]
+
+	or dx, dx
+	jz .even
+.odd:
+	shr ax, 4 ;div ax by 16 -> 2^4
+	jmp .next_cluster_after
+.even:
+	and ax, 0x0FFF
+
+.next_cluster_after:
+	cmp ax, 0x0FF8
+	jae .read_finish
 	
+	mov [kernel_cluster], ax
+	jmp .load_kernel_loop
+
+.read_finish:
+	mov dl, [ebr_drive_number]
+
+	mov ax, KERNEL_LOAD_SEG
+	mov ds, ax
+	mov es, ax
+
+	jmp KERNEL_LOAD_SEG:KERNEL_LOAD_OFFSET
+
+	jmp wait_key_and_reboot
+
+
+
 	cli
     hlt
 
 ;error handling
 
+
 floppy_error:
 	mov si, msg_read_failed
+	call puts
+	jmp wait_key_and_reboot
+
+kernel_not_found_error:
+	mov si, msg_kernel_nf
 	call puts
 	jmp wait_key_and_reboot
 
@@ -150,12 +256,12 @@ disk_read:
 	push cx
 	call lba_to_chs ; convert into chs
 	pop ax	;move sectors to read -> al (Since only the lower bits of cx were set)
-	mov ah, 02h
+	mov ah, 0x2
 	mov di, 3	;counter for retry write loop
 .retry:
 	pusha	;save all registers from interrupt
 	stc	;set carry flag
-	int 13h	;carry flag cleared -> success
+	int 0x13	;carry flag cleared -> success
 	jnc	.done
 	
 	;failed
@@ -187,14 +293,42 @@ disk_reset:
 	pusha
 	mov ah,0
 	stc
-	int 13h
+	int 0x13
 	jc floppy_error
 	popa
 	ret
 
+;prints a string
+;param: ds:si points to string
+puts:
+	push si
+	push ax
+	cld
+.loop:
+	lodsb
+	or al, al
+	jz .done
 
-msg_hello: db 'Hello World!', nwL, 0
+	mov ah, 0x0e ;bios int val for video tty
+	mov bh, 0 ;page=0
+	int 0x10 ;bios int
+	jmp .loop
+
+.done:
+	pop ax
+	pop si
+	ret
+
+msg_kernel_nf: db 'KERNEL.BIN file not found', nwL, 0
+msg_loading: db 'Loading...', nwL, 0
 msg_read_failed: db 'Read from disk failed', nwL, 0
+file_kernel_bin: db 'KERNEL  BIN'
+kernel_cluster: dw 0
+
+KERNEL_LOAD_SEG	equ 0x2000
+KERNEL_LOAD_OFFSET equ 0
 
 times 510-($-$$) db 0
 dw 0AA55h
+
+buffer:
